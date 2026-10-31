@@ -578,7 +578,7 @@ pub const BrowserContext = struct {
         errdefer notification.deinit();
 
         const session = try cdp.browser.newSession(notification);
-        if (cdp.app.config.cookieFile()) |cookie_path| {
+        if (cdp.app.config.cookieFile(cdp.app.workspace_cookies)) |cookie_path| {
             lp.cookies.loadFromFile(session, cookie_path);
         }
 
@@ -659,7 +659,7 @@ pub const BrowserContext = struct {
         self.notification.unregisterAll(self);
         self.clearCapturedResponses();
 
-        if (self.cdp.app.config.cookieJarFile()) |cookie_jar_path| {
+        if (self.cdp.app.config.cookieJarFile(self.cdp.app.workspace_cookies)) |cookie_jar_path| {
             lp.cookies.saveToFile(&self.session.cookie_jar, cookie_jar_path);
         }
 

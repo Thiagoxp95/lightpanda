@@ -45,11 +45,13 @@
     \\          array in the CDP/Puppeteer format, or a Netscape cookie file (the
     \\          cookies.txt format written by curl and wget). The format is
     \\          detected from the file's contents.
-    \\          Defaults to no cookie loading.
+    \\          Defaults to the workspace's cookies.json with --workspace, else no
+    \\          cookie loading.
     \\  --cookie-jar <PATH>
     \\          Path to a JSON file to save cookies to when a CDP browser context
     \\          closes (write-only). With several clients, the last to close wins.
-    \\          Defaults to no cookie saving.
+    \\          Defaults to the workspace's cookies.json with --workspace, else no
+    \\          cookie saving.
     \\  --disable-metrics
     \\          Disables the /metrics endpoint (Prometheus text format).
     \\          Defaults to false (the endpoint is exposed).
@@ -95,10 +97,12 @@
     \\          array in the CDP/Puppeteer format, or a Netscape cookie file (the
     \\          cookies.txt format written by curl and wget). The format is
     \\          detected from the file's contents.
-    \\          Defaults to no cookie loading.
+    \\          Defaults to the workspace's cookies.json with --workspace, else no
+    \\          cookie loading.
     \\  --cookie-jar <PATH>
     \\          Path to a JSON file to save cookies to on exit (write-only).
-    \\          Defaults to no cookie saving.
+    \\          Defaults to the workspace's cookies.json with --workspace, else no
+    \\          cookie saving.
     \\  --dump <DUMP>
     \\          Dumps the document to stdout.
     \\          Defaults to no dump.
@@ -224,10 +228,12 @@
     \\          array in the CDP/Puppeteer format, or a Netscape cookie file (the
     \\          cookies.txt format written by curl and wget). The format is
     \\          detected from the file's contents.
-    \\          Defaults to no cookie loading.
+    \\          Defaults to the workspace's cookies.json with --workspace, else no
+    \\          cookie loading.
     \\  --cookie-jar <PATH>
     \\          Path to a JSON file to save cookies to on exit (write-only).
-    \\          Defaults to no cookie saving.
+    \\          Defaults to the workspace's cookies.json with --workspace, else no
+    \\          cookie saving.
     \\  --host <HOST>
     \\          Host to bind when --port is set (e.g. 0.0.0.0 for all interfaces).
     \\          Defaults to "127.0.0.1".
@@ -465,10 +471,12 @@
     \\          array in the CDP/Puppeteer format, or a Netscape cookie file (the
     \\          cookies.txt format written by curl and wget). The format is
     \\          detected from the file's contents.
-    \\          Defaults to no cookie loading.
+    \\          Defaults to the workspace's cookies.json with --workspace, else no
+    \\          cookie loading.
     \\  --cookie-jar <PATH>
     \\          Path to a JSON file to save cookies to on exit (write-only).
-    \\          Defaults to no cookie saving.
+    \\          Defaults to the workspace's cookies.json with --workspace, else no
+    \\          cookie saving.
     \\  --cors-store-entry-limit <INT>
     \\          Maximum number of entries kept in the CorsStore. 0 means no limit.
     \\          Defaults to 1000.
@@ -642,6 +650,14 @@
     \\          Path to the Ed25519 private key PEM file.
     \\  --web-bot-auth-keyid <STRING>
     \\          The JWK thumbprint of your public key.
+    \\  --workspace <NAME>
+    \\          Named, persistent browsing identity. Cookies load from and save to
+    \\          <data dir>/workspaces/<NAME>/cookies.json (mode 0600) on exit and
+    \\          after each tool call, so a sign-in survives restarts. Workspaces
+    \\          never share cookies. --cookie and --cookie-jar override the file.
+    \\          NAME is 1 to 64 characters of a-z, 0-9, '_' or '-'.
+    \\          Defaults to the LIGHTPANDA_WORKSPACE environment variable, else
+    \\          none (no persistence).
     \\  --ws-max-concurrent <INT>
     \\          Maximum number of concurrent WebSocket connections.
     \\          Defaults to 8.

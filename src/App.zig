@@ -22,6 +22,7 @@ const lp = @import("lightpanda");
 const Regex = @import("Regex.zig");
 const Config = @import("Config.zig");
 const Watchdog = @import("Watchdog.zig");
+const Workspace = @import("Workspace.zig");
 pub const ArenaPool = @import("ArenaPool.zig");
 
 const Snapshot = @import("browser/js/Snapshot.zig");
@@ -47,6 +48,11 @@ watchdog: Watchdog,
 allocator: Allocator,
 arena_pool: ArenaPool,
 app_dir_path: ?[]const u8,
+
+/// Resolved once from `--workspace`, so nothing downstream re-derives paths.
+workspace: ?Workspace,
+/// The workspace's cookie jar, the default for `--cookie` and `--cookie-jar`.
+workspace_cookies: ?[]const u8,
 
 regex_context: *Regex.Context,
 default_sanitizer: *Sanitizer,
@@ -86,6 +92,8 @@ pub fn init(allocator: Allocator, config: *const Config) !*App {
         .render_fonts = render_fonts,
         .network = undefined,
         .app_dir_path = undefined,
+        .workspace = null,
+        .workspace_cookies = null,
         .telemetry = undefined,
         .arena_pool = undefined,
         .default_sanitizer = undefined,
@@ -104,6 +112,24 @@ pub fn init(allocator: Allocator, config: *const Config) !*App {
     errdefer app.network.deinit();
 
     app.app_dir_path = getAndMakeAppDir(allocator);
+
+    if (config.workspaceName()) |name| {
+        const app_dir = app.app_dir_path orelse {
+            log.fatal(.app, "workspace needs a data dir", .{ .workspace = name });
+            return error.AppDataDirUnavailable;
+        };
+        const workspace = Workspace.open(allocator, app_dir, name) catch |err| {
+            log.fatal(.app, "open workspace", .{ .workspace = name, .err = err });
+            return err;
+        };
+        errdefer workspace.deinit(allocator);
+        app.workspace_cookies = try workspace.cookiesPath(allocator);
+        app.workspace = workspace;
+    }
+    errdefer if (app.workspace) |ws| {
+        ws.deinit(allocator);
+        allocator.free(app.workspace_cookies.?);
+    };
 
     app.telemetry = try Telemetry.init(app);
     errdefer app.telemetry.deinit(allocator);
@@ -124,6 +150,10 @@ pub fn deinit(self: *App) void {
     if (self.app_dir_path) |app_dir_path| {
         allocator.free(app_dir_path);
         self.app_dir_path = null;
+    }
+    if (self.workspace) |ws| {
+        ws.deinit(allocator);
+        allocator.free(self.workspace_cookies.?);
     }
     self.telemetry.deinit(allocator);
     self.network.deinit();

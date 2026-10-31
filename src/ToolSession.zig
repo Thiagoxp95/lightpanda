@@ -25,6 +25,7 @@ const Browser = @import("browser/Browser.zig");
 const Session = @import("browser/Session.zig");
 const Notification = @import("Notification.zig");
 const NodeRegistry = @import("NodeRegistry.zig");
+const cookies = @import("cookies.zig");
 
 const ToolSession = @This();
 
@@ -32,6 +33,8 @@ browser: Browser,
 session: *Session,
 notification: *Notification,
 registry: NodeRegistry,
+/// `session.cookie_jar.version` at the last write of the jar to disk.
+saved_cookie_version: u64,
 
 /// Leaves the browser's isolate entered, like `Browser.init`; callers
 /// sharing one thread between several isolates park it with
@@ -53,7 +56,30 @@ pub fn init(self: *ToolSession, app: *App) !void {
 /// storage and history gone. The old `session` pointer is invalid afterwards.
 pub fn restartSession(self: *ToolSession) !void {
     self.session = try self.browser.newSession(self.notification);
+    self.saved_cookie_version = self.session.cookie_jar.version;
     try self.session.enableConsoleCapture();
+}
+
+/// Loads `--cookie`, else the workspace's jar, into the session.
+pub fn loadCookies(self: *ToolSession, app: *App) void {
+    if (app.config.cookieFile(app.workspace_cookies)) |path| {
+        cookies.loadFromFile(self.session, path);
+    }
+}
+
+/// Writes the jar to `--cookie-jar`, else the workspace's jar.
+pub fn saveCookies(self: *ToolSession, app: *App) void {
+    const path = app.config.cookieJarFile(app.workspace_cookies) orelse return;
+    cookies.saveToFile(&self.session.cookie_jar, path);
+    self.saved_cookie_version = self.session.cookie_jar.version;
+}
+
+/// `saveCookies` unless the jar is as it was last written: cheap enough to
+/// call after every tool call, so a crash loses at most the call in flight.
+pub fn flushCookies(self: *ToolSession, app: *App) void {
+    if (self.session.cookie_jar.version != self.saved_cookie_version) {
+        self.saveCookies(app);
+    }
 }
 
 /// The isolate must be current (`enterIsolate` if parked): Browser.deinit's

@@ -167,6 +167,7 @@ model_base_url: ?[:0]const u8,
 model_completions: ?ModelCompletions,
 model_completion_arena: std.heap.ArenaAllocator,
 ts: lp.ToolSession,
+app: *App,
 terminal: Terminal,
 save_buffer: Recorder,
 save_path: ?[]u8,
@@ -363,6 +364,7 @@ pub fn init(allocator: std.mem.Allocator, app: *App, opts: Config.Agent) !*Agent
         .model_completions = null,
         .model_completion_arena = .init(allocator),
         .ts = undefined,
+        .app = app,
         .terminal = .init(allocator, history_paths, verbosity, will_repl),
         .save_buffer = .init(allocator),
         .save_path = null,
@@ -384,6 +386,7 @@ pub fn init(allocator: std.mem.Allocator, app: *App, opts: Config.Agent) !*Agent
 
     try self.ts.init(app);
     errdefer self.ts.deinit();
+    self.ts.loadCookies(app);
 
     self.ai_client = if (self.credential) |*c| try zenai.provider.Client.init(lp.io, allocator, c.provider, c.keySlice(), .{ .base_url = opts.base_url, .retry_policy = .long_running, .bill_to = hfBillTo(c.provider), .environ = lp.environ(), .account_id = c.accountId() }) else null;
     errdefer if (self.ai_client) |c| c.deinit(allocator);
@@ -414,6 +417,7 @@ pub fn init(allocator: std.mem.Allocator, app: *App, opts: Config.Agent) !*Agent
 }
 
 pub fn deinit(self: *Agent) void {
+    self.ts.saveCookies(self.app);
     if (self.trace) |*t| {
         t.end(self.total_usage);
         t.deinit();
@@ -623,6 +627,7 @@ fn gotoStart(self: *Agent, url: [:0]const u8) bool {
     var object: std.json.ObjectMap = .empty;
     object.put(a, "url", .{ .string = url }) catch return false;
     const args: std.json.Value = .{ .object = object };
+    defer self.ts.flushCookies(self.app);
     const result = browser_tools.call(a, self.ts.session, &self.ts.registry, "goto", args, .{ .source = .user }) catch |err| {
         self.terminal.printError("could not open {s}: {s}", .{ url, browser_tools.errorMessage(err) });
         return false;
@@ -1720,6 +1725,7 @@ fn printSlashHelp(self: *Agent, arena: std.mem.Allocator, target: []const u8) vo
 }
 
 fn runCommand(self: *Agent, arena: std.mem.Allocator, tc: Command.ToolCall) browser_tools.ToolResult {
+    defer self.ts.flushCookies(self.app);
     // The terminal can't show an image, but the conversation can.
     return browser_tools.call(arena, self.ts.session, &self.ts.registry, tc.name(), tc.args, .{ .inline_image = self.ai_client != null, .record = true, .nav_note = true, .source = .user }) catch |err| .{
         .text = switch (err) {
@@ -2232,6 +2238,7 @@ fn toolOutcome(self: *Agent, allocator: std.mem.Allocator, tool_name: []const u8
         }
     }
 
+    defer self.ts.flushCookies(self.app);
     const result = try browser_tools.call(allocator, self.ts.session, &self.ts.registry, tool_name, args, .{
         .inline_image = true,
         .record = self.capturing_for_save,

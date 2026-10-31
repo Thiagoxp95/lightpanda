@@ -275,9 +275,14 @@ fn run(allocator: Allocator, main_arena: Allocator, proc_args: std.process.Args)
             }
             defer if (cdp_server) |s| s.deinit();
 
+            // A signal ends the stdio loop, so the server's deinit flushes the
+            // cookie jar before the process exits.
+            var mcp_stop: std.atomic.Value(bool) = .init(false);
+            try sighandler.on(requestStop, .{&mcp_stop});
+
             var mcp_err: ?anyerror = null;
             {
-                var worker_thread = try std.Thread.spawn(.{}, mcpThread, .{ allocator, app, cdp_server, &mcp_err });
+                var worker_thread = try std.Thread.spawn(.{}, mcpThread, .{ allocator, app, cdp_server, &mcp_stop, &mcp_err });
                 defer worker_thread.join();
 
                 // mcp talks over stdio on mcpThread. Only run the CDP accept/read
@@ -407,7 +412,11 @@ fn fetchThread(app: *App, ft: *FetchTerminator, urls: []const [:0]const u8, fetc
     };
 }
 
-fn mcpThread(allocator: std.mem.Allocator, app: *App, cdp_server: ?*lp.Server, err_out: *?anyerror) void {
+fn requestStop(flag: *std.atomic.Value(bool)) void {
+    flag.store(true, .release);
+}
+
+fn mcpThread(allocator: std.mem.Allocator, app: *App, cdp_server: ?*lp.Server, stop: *const std.atomic.Value(bool), err_out: *?anyerror) void {
     defer if (cdp_server) |s| {
         s.shutdown();
     };
@@ -422,7 +431,7 @@ fn mcpThread(allocator: std.mem.Allocator, app: *App, cdp_server: ?*lp.Server, e
 
     var stdin_buf: [64 * 1024]u8 = undefined;
     var stdin = std.Io.File.stdin().readerStreaming(lp.io, &stdin_buf);
-    lp.mcp.router.processRequests(mcp_server, &stdin.interface, std.Io.File.stdin()) catch |err| {
+    lp.mcp.router.processRequests(mcp_server, &stdin.interface, std.Io.File.stdin(), stop) catch |err| {
         err_out.* = err;
         log.fatal(.mcp, "mcp error", .{ .err = err });
     };

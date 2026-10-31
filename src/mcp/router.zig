@@ -12,8 +12,10 @@ const log = lp.log;
 /// resources can omit them and the router returns `MethodNotFound`
 /// automatically. When `input` is the file behind `reader`, the server must
 /// also expose `idle`: the router then pumps the browser session between
-/// requests instead of blocking on the read.
-pub fn processRequests(server: anytype, reader: *std.Io.Reader, input: ?std.Io.File) !void {
+/// requests instead of blocking on the read. Once `stop` is set the loop ends
+/// at its next idle tick (at most a quarter second), so the caller can flush
+/// state before the process exits.
+pub fn processRequests(server: anytype, reader: *std.Io.Reader, input: ?std.Io.File, stop: *const std.atomic.Value(bool)) !void {
     var arena: std.heap.ArenaAllocator = .init(server.allocator);
     defer arena.deinit();
 
@@ -21,7 +23,8 @@ pub fn processRequests(server: anytype, reader: *std.Io.Reader, input: ?std.Io.F
         _ = arena.reset(.retain_capacity);
         const aa = arena.allocator();
 
-        if (input) |file| idleUntilInput(server, reader, file);
+        if (input) |file| idleUntilInput(server, reader, file, stop);
+        if (stop.load(.acquire)) break;
 
         const buffered_line = reader.takeDelimiter('\n') catch |err| switch (err) {
             error.StreamTooLong => {
@@ -48,9 +51,10 @@ pub fn processRequests(server: anytype, reader: *std.Io.Reader, input: ?std.Io.F
 /// Returns once `reader` holds a delimiter or the fd is readable —
 /// `takeDelimiter` may still block on a partial line, but MCP clients write
 /// whole lines. A full buffer also returns so StreamTooLong surfaces.
-fn idleUntilInput(server: anytype, reader: *std.Io.Reader, file: std.Io.File) void {
+fn idleUntilInput(server: anytype, reader: *std.Io.Reader, file: std.Io.File, stop: *const std.atomic.Value(bool)) void {
     while (std.mem.findScalar(u8, reader.buffered(), '\n') == null and
-        reader.bufferedLen() < reader.buffer.len)
+        reader.bufferedLen() < reader.buffer.len and
+        !stop.load(.acquire))
     {
         const wait_ms = server.idle();
         var fds = [_]std.posix.pollfd{.{ .fd = file.handle, .events = std.posix.POLL.IN, .revents = 0 }};
