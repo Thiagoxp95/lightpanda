@@ -23,6 +23,7 @@ const Regex = @import("Regex.zig");
 const Config = @import("Config.zig");
 const Watchdog = @import("Watchdog.zig");
 const Workspace = @import("Workspace.zig");
+const Vault = @import("Vault.zig");
 pub const ArenaPool = @import("ArenaPool.zig");
 
 const Snapshot = @import("browser/js/Snapshot.zig");
@@ -125,6 +126,7 @@ pub fn init(allocator: Allocator, config: *const Config) !*App {
         errdefer workspace.deinit(allocator);
         app.workspace_cookies = try workspace.cookiesPath(allocator);
         app.workspace = workspace;
+        Vault.install(allocator, workspace);
     }
     errdefer if (app.workspace) |ws| {
         ws.deinit(allocator);
@@ -152,6 +154,7 @@ pub fn deinit(self: *App) void {
         self.app_dir_path = null;
     }
     if (self.workspace) |ws| {
+        Vault.uninstall();
         ws.deinit(allocator);
         allocator.free(self.workspace_cookies.?);
     }

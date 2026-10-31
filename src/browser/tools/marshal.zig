@@ -24,6 +24,7 @@ const std = @import("std");
 const lp = @import("../../lightpanda.zig");
 
 const NodeRegistry = @import("../../NodeRegistry.zig");
+const Vault = @import("../../Vault.zig");
 const tools = @import("../tools.zig");
 const Tool = tools.Tool;
 const testing = @import("../../testing.zig");
@@ -154,9 +155,9 @@ pub fn normalizeArgs(arena: std.mem.Allocator, tool: Tool, args: ?std.json.Value
     return .{ .object = new_obj };
 }
 
-/// Walks `std.c.environ` (live) and dupes names into `arena` — `setenv`
-/// can free both the environ array and its entry strings, so a captured
-/// `std.os.environ` slice or name pointers into entries would dangle.
+/// The `LP_*` names the model may list: the live environment (walked each
+/// time: `setenv` can free both the environ array and its entry strings) and
+/// the workspace vault's placeholders, sorted and deduplicated.
 pub fn lpEnvNames(arena: std.mem.Allocator) error{OutOfMemory}![]const []const u8 {
     var env_names: std.ArrayList([]const u8) = .empty;
     var ptr = std.c.environ;
@@ -167,11 +168,21 @@ pub fn lpEnvNames(arena: std.mem.Allocator) error{OutOfMemory}![]const []const u
         if (!std.mem.startsWith(u8, name, "LP_")) continue;
         try env_names.append(arena, try arena.dupe(u8, name));
     }
+    if (Vault.current()) |vault| {
+        try env_names.appendSlice(arena, try vault.names(arena));
+    }
     std.mem.sort([]const u8, env_names.items, {}, struct {
         fn lt(_: void, a: []const u8, b: []const u8) bool {
             return std.mem.lessThan(u8, a, b);
         }
     }.lt);
+    var unique: usize = 0;
+    for (env_names.items, 0..) |name, i| {
+        if (i > 0 and std.mem.eql(u8, name, env_names.items[unique - 1])) continue;
+        env_names.items[unique] = name;
+        unique += 1;
+    }
+    env_names.items.len = unique;
     return env_names.toOwnedSlice(arena);
 }
 
@@ -192,11 +203,51 @@ pub fn lookupLpEnv(name: []const u8) ?[:0]const u8 {
     return std.mem.span(value);
 }
 
+/// Whether `getEnv` may show the model this name's value. A vault entry's
+/// placeholders never, and by the same rule any `*_PASSWORD` / `*_TOTP`
+/// from the environment: those are for `$NAME` in a tool argument only.
+pub fn modelReadable(name: []const u8) bool {
+    if (std.mem.endsWith(u8, name, "_PASSWORD") or std.mem.endsWith(u8, name, "_TOTP")) return false;
+    var buf: [Vault.max_name_len]u8 = undefined;
+    const ph = Vault.parsePlaceholder(name, &buf) orelse return true;
+    const vault = Vault.current() orelse return true;
+    return vault.find(ph.entry) == null;
+}
+
+/// The vault entry bound to `host`, for bare `/login` to pick.
+pub fn vaultEntryForHost(host: ?[]const u8) ?[]const u8 {
+    const vault = Vault.current() orelse return null;
+    const entry = vault.forHost(host orelse return null) orelse return null;
+    return entry.name;
+}
+
+const Resolved = union(enum) {
+    none,
+    value: []const u8,
+    refused: *const Vault.Entry,
+};
+
+/// The vault answers first, bound to `host`; the environment has no binding.
+fn resolve(arena: std.mem.Allocator, name: []const u8, host: ?[]const u8) error{OutOfMemory}!Resolved {
+    if (Vault.current()) |vault| {
+        switch (try vault.lookup(arena, name, host)) {
+            .none => {},
+            .value => |v| return .{ .value = v },
+            .host_mismatch => |entry| return .{ .refused = entry },
+        }
+    }
+    if (lookupLpEnv(name)) |v| return .{ .value = v };
+    return .none;
+}
+
+pub const SubstituteError = error{ OutOfMemory, CredentialHostMismatch };
+
 /// Resolve `$LP_*` placeholders in every string arg before the tool runs.
 /// `fill.value` is the one exception: `execFill` resolves it internally and
 /// echoes the original placeholder so the credential never surfaces in the
-/// result text.
-pub fn substituteStringArgs(arena: std.mem.Allocator, tool: Tool, args: ?std.json.Value) error{OutOfMemory}!?std.json.Value {
+/// result text. `host` is the current page's, which a vault value must be
+/// bound to; on `error.CredentialHostMismatch`, `hostMismatchText` says why.
+pub fn substituteStringArgs(arena: std.mem.Allocator, tool: Tool, args: ?std.json.Value, host: ?[]const u8) SubstituteError!?std.json.Value {
     const v = args orelse return null;
     if (v != .object) return v;
 
@@ -221,7 +272,7 @@ pub fn substituteStringArgs(arena: std.mem.Allocator, tool: Tool, args: ?std.jso
         const key = entry.key_ptr.*;
         const val = entry.value_ptr.*;
         const new_val: std.json.Value = if (needsSub(is_fill, key, val))
-            .{ .string = try substituteEnvVars(arena, val.string) }
+            .{ .string = try substituteEnvVars(arena, val.string, host) }
         else
             val;
         try new_obj.put(arena, key, new_val);
@@ -229,46 +280,111 @@ pub fn substituteStringArgs(arena: std.mem.Allocator, tool: Tool, args: ?std.jso
     return .{ .object = new_obj };
 }
 
-pub fn substituteEnvVars(arena: std.mem.Allocator, input: []const u8) error{OutOfMemory}![]const u8 {
-    // No `$LP_` prefix → no substitution possible, skip the rebuild entirely.
-    // Pages routinely contain `$5.99`-style content where `$` is incidental.
+/// `$NAME` runs: `$` then `[A-Za-z0-9_]+`, from the first `$LP_` on. Pages
+/// routinely contain `$5.99`-style content where `$` is incidental.
+const PlaceholderIterator = struct {
+    input: []const u8,
+    i: usize,
+
+    const Match = struct { start: usize, end: usize, name: []const u8 };
+
+    fn init(input: []const u8) ?PlaceholderIterator {
+        const first_lp = std.mem.find(u8, input, "$LP_") orelse return null;
+        return .{ .input = input, .i = first_lp };
+    }
+
+    fn next(self: *PlaceholderIterator) ?Match {
+        while (std.mem.findScalarPos(u8, self.input, self.i, '$')) |dollar| {
+            const var_start = dollar + 1;
+            var var_end = var_start;
+            while (var_end < self.input.len and (std.ascii.isAlphanumeric(self.input[var_end]) or self.input[var_end] == '_')) {
+                var_end += 1;
+            }
+            if (var_end == var_start) {
+                self.i = dollar + 1;
+                continue;
+            }
+            self.i = var_end;
+            return .{ .start = dollar, .end = var_end, .name = self.input[var_start..var_end] };
+        }
+        return null;
+    }
+};
+
+pub fn substituteEnvVars(arena: std.mem.Allocator, input: []const u8, host: ?[]const u8) SubstituteError![]const u8 {
     // Lowercase `$lp_…` falls through here too — `getenv` is
     // case-sensitive on Linux, so it would never resolve anyway.
-    const first_lp = std.mem.find(u8, input, "$LP_") orelse return input;
+    var it = PlaceholderIterator.init(input) orelse return input;
 
     var result: std.ArrayList(u8) = .empty;
     try result.ensureTotalCapacity(arena, input.len);
-    var i: usize = first_lp;
     var last_copy: usize = 0;
-    while (std.mem.findScalarPos(u8, input, i, '$')) |dollar| {
-        const var_start = dollar + 1;
-        var var_end = var_start;
-        while (var_end < input.len and (std.ascii.isAlphanumeric(input[var_end]) or input[var_end] == '_')) {
-            var_end += 1;
+    while (it.next()) |m| {
+        switch (try resolve(arena, m.name, host)) {
+            .none => {},
+            .value => |val| {
+                try result.appendSlice(arena, input[last_copy..m.start]);
+                try result.appendSlice(arena, val);
+                last_copy = m.end;
+            },
+            .refused => |entry| {
+                log.warn(.browser, "credential host mismatch", .{ .placeholder = m.name, .entry = entry.name, .host = host orelse "(no page)" });
+                return error.CredentialHostMismatch;
+            },
         }
-        if (var_end == var_start) {
-            i = dollar + 1;
-            continue;
-        }
-        const name = input[var_start..var_end];
-        if (lookupLpEnv(name)) |val| {
-            try result.appendSlice(arena, input[last_copy..dollar]);
-            try result.appendSlice(arena, val);
-            last_copy = var_end;
-        }
-        i = var_end;
     }
     if (last_copy == 0) return input;
     try result.appendSlice(arena, input[last_copy..]);
     return result.toOwnedSlice(arena);
 }
 
+/// Why `substituteEnvVars` refused `input` for `host`: the placeholder, its
+/// entry and the entry's hosts, never the value. `args` may be a string or
+/// the tool's argument object.
+pub fn hostMismatchText(arena: std.mem.Allocator, args: ?std.json.Value, host: ?[]const u8) error{OutOfMemory}![]const u8 {
+    const v = args orelse return generic_mismatch;
+    switch (v) {
+        .string => |s| return hostMismatchTextFor(arena, s, host),
+        .object => |o| {
+            var it = o.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.* != .string) continue;
+                const text = try hostMismatchTextFor(arena, entry.value_ptr.string, host);
+                if (text.ptr != generic_mismatch.ptr) return text;
+            }
+            return generic_mismatch;
+        },
+        else => return generic_mismatch,
+    }
+}
+
+const generic_mismatch = "a vault credential in the arguments is bound to another host; it stays in the vault";
+
+fn hostMismatchTextFor(arena: std.mem.Allocator, input: []const u8, host: ?[]const u8) error{OutOfMemory}![]const u8 {
+    var it = PlaceholderIterator.init(input) orelse return generic_mismatch;
+    while (it.next()) |m| {
+        switch (try resolve(arena, m.name, host)) {
+            .refused => |entry| {
+                const hosts = try std.mem.join(arena, ", ", entry.hosts);
+                return if (host) |h|
+                    try arena.print("${s} belongs to vault entry \"{s}\", bound to {s}; the current page is on {s}, so it stays in the vault", .{ m.name, entry.name, hosts, h })
+                else
+                    try arena.print("${s} belongs to vault entry \"{s}\", bound to {s}; no page is loaded, so it stays in the vault", .{ m.name, entry.name, hosts });
+            },
+            else => {},
+        }
+    }
+    return generic_mismatch;
+}
+
 /// Inverse of `substituteEnvVars`, used by the recorder so a credential the
-/// agent retyped as a literal doesn't leak into the recording. Values < 4
-/// chars are skipped to avoid false-positive substring matches.
+/// agent retyped as a literal doesn't leak into the recording. Vault values
+/// count whatever page produced them. Values < 4 chars are skipped to avoid
+/// false-positive substring matches.
 pub fn reverseSubstituteEnvVars(arena: std.mem.Allocator, input: []const u8) error{OutOfMemory}![]const u8 {
     if (input.len < 4) return input;
     const env_names = try lpEnvNames(arena);
+    const vault = Vault.current();
 
     // Iterate by value length descending. With two LP_* values where one is a
     // substring of the other (both ≥4 chars so neither is filtered), name-order
@@ -278,7 +394,7 @@ pub fn reverseSubstituteEnvVars(arena: std.mem.Allocator, input: []const u8) err
     var pairs: std.ArrayList(Pair) = .empty;
     try pairs.ensureTotalCapacityPrecise(arena, env_names.len);
     for (env_names) |name| {
-        const value = lookupLpEnv(name) orelse continue;
+        const value = (if (vault) |v| try v.unbound(arena, name) else null) orelse lookupLpEnv(name) orelse continue;
         if (value.len < 4) continue;
         pairs.appendAssumeCapacity(.{ .name = name, .value = value });
     }
@@ -368,7 +484,7 @@ test "substituteEnvVars resolves LP_* vars" {
     _ = testing.setenv(@constCast(var_name), @constCast(var_value), 1);
     defer _ = testing.unsetenv(@constCast(var_name));
 
-    const r = try substituteEnvVars(arena.allocator(), "user=$LP_SUBST_TEST/end");
+    const r = try substituteEnvVars(arena.allocator(), "user=$LP_SUBST_TEST/end", null);
     try std.testing.expectEqualStrings("user=secret/end", r);
 }
 
@@ -384,7 +500,7 @@ test "substituteEnvVars keeps non-LP_ refs literal even when set" {
     _ = testing.setenv(@constCast(var_name), @constCast(var_value), 1);
     defer _ = testing.unsetenv(@constCast(var_name));
 
-    const r = try substituteEnvVars(arena.allocator(), "$LIGHTPANDA_SUBST_TEST_OUTSIDE");
+    const r = try substituteEnvVars(arena.allocator(), "$LIGHTPANDA_SUBST_TEST_OUTSIDE", null);
     try std.testing.expectEqualStrings("$LIGHTPANDA_SUBST_TEST_OUTSIDE", r);
 }
 
@@ -392,7 +508,7 @@ test "substituteEnvVars missing LP_ var kept literal" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
 
-    const r = try substituteEnvVars(arena.allocator(), "$LP_UNLIKELY_VAR_12345");
+    const r = try substituteEnvVars(arena.allocator(), "$LP_UNLIKELY_VAR_12345", null);
     try std.testing.expectEqualStrings("$LP_UNLIKELY_VAR_12345", r);
 }
 
@@ -400,6 +516,60 @@ test "substituteEnvVars bare dollar" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
 
-    const r = try substituteEnvVars(arena.allocator(), "price is $ 5");
+    const r = try substituteEnvVars(arena.allocator(), "price is $ 5", null);
     try std.testing.expectEqualStrings("price is $ 5", r);
+}
+
+test "substituteEnvVars: vault values are bound to the page host" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    var vault: Vault = .empty(std.testing.allocator);
+    try vault.put(.{ .name = "site", .hosts = &.{"127.0.0.1"}, .username = "alice", .password = "pw123" });
+    Vault.installOpen(vault);
+    defer Vault.uninstall();
+
+    try std.testing.expectEqualStrings("u=alice p=pw123", try substituteEnvVars(aa, "u=$LP_SITE_USERNAME p=$LP_SITE_PASSWORD", "127.0.0.1"));
+    try std.testing.expectError(error.CredentialHostMismatch, substituteEnvVars(aa, "p=$LP_SITE_PASSWORD", "localhost"));
+    try std.testing.expectError(error.CredentialHostMismatch, substituteEnvVars(aa, "p=$LP_SITE_PASSWORD", null));
+    // An unknown placeholder is left alone, whatever the host.
+    try std.testing.expectEqualStrings("$LP_OTHER_PASSWORD", try substituteEnvVars(aa, "$LP_OTHER_PASSWORD", "localhost"));
+
+    const text = try hostMismatchText(aa, .{ .string = "p=$LP_SITE_PASSWORD" }, "localhost");
+    try std.testing.expectEqualStrings("$LP_SITE_PASSWORD belongs to vault entry \"site\", bound to 127.0.0.1; the current page is on localhost, so it stays in the vault", text);
+    try std.testing.expectEqual(null, std.mem.find(u8, text, "pw123"));
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(aa, "selector", .{ .string = "#pw" });
+    try args.put(aa, "text", .{ .string = "$LP_SITE_PASSWORD" });
+    try std.testing.expectError(error.CredentialHostMismatch, substituteStringArgs(aa, .evaluate, .{ .object = args }, "localhost"));
+    try std.testing.expect(std.mem.startsWith(u8, try hostMismatchText(aa, .{ .object = args }, null), "$LP_SITE_PASSWORD belongs to vault entry \"site\", bound to 127.0.0.1; no page is loaded"));
+
+    // `fill.value` is left for `execFill`, so no host check here.
+    var fill_args: std.json.ObjectMap = .empty;
+    try fill_args.put(aa, "value", .{ .string = "$LP_SITE_PASSWORD" });
+    const kept = (try substituteStringArgs(aa, .fill, .{ .object = fill_args }, "localhost")).?;
+    try std.testing.expectEqualStrings("$LP_SITE_PASSWORD", kept.object.get("value").?.string);
+
+    try std.testing.expectEqual(false, modelReadable("LP_SITE_USERNAME"));
+    try std.testing.expectEqual(false, modelReadable("LP_SITE_PASSWORD"));
+    try std.testing.expectEqual(false, modelReadable("LP_PASSWORD"));
+    try std.testing.expectEqual(false, modelReadable("LP_HN_TOTP"));
+    try std.testing.expectEqual(true, modelReadable("LP_OTHER_USERNAME"));
+    try std.testing.expectEqual(true, modelReadable("LP_EMAIL"));
+
+    try std.testing.expectEqualStrings("site", vaultEntryForHost("127.0.0.1").?);
+    try std.testing.expectEqual(null, vaultEntryForHost("localhost"));
+    try std.testing.expectEqual(null, vaultEntryForHost(null));
+
+    const names = try lpEnvNames(aa);
+    var seen: usize = 0;
+    for (names) |n| {
+        if (std.mem.eql(u8, n, "LP_SITE_USERNAME") or std.mem.eql(u8, n, "LP_SITE_PASSWORD")) seen += 1;
+    }
+    try std.testing.expectEqual(2, seen);
+
+    // Recordings scrub vault values whatever page produced them.
+    try std.testing.expectEqualStrings("fill('#pw', '$LP_SITE_PASSWORD')", try reverseSubstituteEnvVars(aa, "fill('#pw', 'pw123')"));
 }

@@ -42,12 +42,15 @@ pub const lpEnvNames = marshal.lpEnvNames;
 pub const normalizeArgs = marshal.normalizeArgs;
 pub const substituteEnvVars = marshal.substituteEnvVars;
 pub const reverseSubstituteEnvVars = marshal.reverseSubstituteEnvVars;
+pub const hostMismatchText = marshal.hostMismatchText;
+pub const vaultEntryForHost = marshal.vaultEntryForHost;
 
 pub const parseArgsOrDefault = marshal.parseArgsOrDefault;
 const substituteStringArgs = marshal.substituteStringArgs;
 const diagnoseArgs = marshal.diagnoseArgs;
 const diagnoseMissingRequired = marshal.diagnoseMissingRequired;
 const lookupLpEnv = marshal.lookupLpEnv;
+const modelReadable = marshal.modelReadable;
 pub const search = @import("tools/search.zig");
 pub const choose = @import("tools/choose.zig");
 pub const classify = @import("tools/classify.zig");
@@ -520,7 +523,11 @@ fn callInner(
     // After normalizeArgs so a PascalCase `Script` or a `null` isn't missed.
     if (diagnoseMissingRequired(arena, tool, normalized)) |msg|
         return .invalidParams(msg);
-    const substituted = try substituteStringArgs(arena, tool, normalized);
+    const host = pageHost(session);
+    const substituted = substituteStringArgs(arena, tool, normalized, host) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.CredentialHostMismatch => return .{ .text = try hostMismatchText(arena, normalized, host), .is_error = true },
+    };
 
     // Before dispatch, because a navigation takes the node with it. Gated on
     // `isRecorded` because `SelectorPath.build` is the expensive part of a tool
@@ -1600,7 +1607,11 @@ fn execFill(arena: std.mem.Allocator, session: *lp.Session, registry: *NodeRegis
     };
     const args = try parseArgs(Params, arena, arguments);
     const raw_text = args.value;
-    const text = try substituteEnvVars(arena, raw_text);
+    const host = pageHost(session);
+    const text = substituteEnvVars(arena, raw_text, host) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.CredentialHostMismatch => return .{ .text = try hostMismatchText(arena, .{ .string = raw_text }, host), .is_error = true },
+    };
     const resolved = try resolveTarget(session, registry, args.selector, args.backendNodeId);
 
     // The same refusal `login` makes, on the path the driver guidance sends a
@@ -1924,12 +1935,23 @@ fn execGetEnv(arena: std.mem.Allocator, arguments: ?std.json.Value) ToolError![]
     const args = try parseArgsOrDefault(Params, arena, arguments);
 
     if (args.name) |name| {
+        if (!modelReadable(name)) {
+            return arena.print("'{s}' is a credential and is never shown; use it as ${s} in a tool argument instead", .{ name, name }) catch ToolError.InternalError;
+        }
         if (lookupLpEnv(name)) |value| return value;
         return arena.print("Environment variable '{s}' is not set", .{name}) catch ToolError.InternalError;
     }
 
     const env_names = lpEnvNames(arena) catch return ToolError.InternalError;
     return formatLpEnvNames(arena, env_names);
+}
+
+/// The host a vault credential may be sent to right now: the current page's,
+/// `null` before any page is loaded.
+pub fn pageHost(session: *lp.Session) ?[]const u8 {
+    const frame = session.currentFrame() orelse return null;
+    const host = lp.URL.getHostname(frame.url);
+    return if (host.len == 0) null else host;
 }
 
 fn formatLpEnvNames(arena: std.mem.Allocator, env_names: []const []const u8) ToolError![]const u8 {
@@ -2138,7 +2160,10 @@ pub fn startGoto(
     receiver_frame_id: ?u32,
 ) ToolError!StartedGoto {
     // This path bypasses `call`, so it needs its own `$LP_*` substitution pass.
-    const args = try parseArgs(GotoParams, arena, try substituteStringArgs(arena, .goto, arguments));
+    const args = try parseArgs(GotoParams, arena, substituteStringArgs(arena, .goto, arguments, pageHost(session)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.CredentialHostMismatch => return error.InvalidParams,
+    });
     if (receiver_frame_id) |fid| closePage(arena, session, registry, fid);
     const page = try openPage(session, args.url);
     return .{

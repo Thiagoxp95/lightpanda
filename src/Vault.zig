@@ -555,17 +555,26 @@ const Provider = union(enum) {
 };
 
 var provider: Provider = .none;
-var provider_mutex: std.Thread.Mutex = .{};
+var provider_mutex: std.Io.Mutex = .init;
 
 pub fn install(allocator: Allocator, workspace: Workspace) void {
-    provider_mutex.lock();
-    defer provider_mutex.unlock();
+    provider_mutex.lockUncancelable(lp.io);
+    defer provider_mutex.unlock(lp.io);
     provider = .{ .locked = .{ .allocator = allocator, .workspace = workspace } };
 }
 
+/// Tests only: an already-open vault as the process's.
+pub fn installOpen(vault: Vault) void {
+    std.debug.assert(lp.IS_TEST);
+    provider_mutex.lockUncancelable(lp.io);
+    defer provider_mutex.unlock(lp.io);
+    if (provider == .open) provider.open.deinit();
+    provider = .{ .open = vault };
+}
+
 pub fn uninstall() void {
-    provider_mutex.lock();
-    defer provider_mutex.unlock();
+    provider_mutex.lockUncancelable(lp.io);
+    defer provider_mutex.unlock(lp.io);
     if (provider == .open) provider.open.deinit();
     provider = .none;
 }
@@ -573,8 +582,8 @@ pub fn uninstall() void {
 /// The workspace's vault, opened on first use; `null` when the process has
 /// no workspace or the workspace has no vault.
 pub fn current() ?*const Vault {
-    provider_mutex.lock();
-    defer provider_mutex.unlock();
+    provider_mutex.lockUncancelable(lp.io);
+    defer provider_mutex.unlock(lp.io);
     switch (provider) {
         .none, .absent => return null,
         .open => |*v| return v,

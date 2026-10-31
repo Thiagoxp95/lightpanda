@@ -295,14 +295,23 @@ pub const Command = union(enum) {
     };
 
     pub const bare_login_help =
-        \\Bare /login uses $LP_PASSWORD with $LP_USERNAME (or $LP_EMAIL) when set.
+        \\Bare /login uses the vault entry for the current site when there is one,
+        \\else $LP_PASSWORD with $LP_USERNAME (or $LP_EMAIL) when set.
         \\Otherwise, without 
     ++ @import("zenai").typesafe.env_var_name ++
         \\ the model picks the LP_* variables for the
         \\site; with it, pass password=$LP_… username=$LP_….
     ;
 
-    pub fn bareLogin(arena: std.mem.Allocator, lp_names: []const []const u8, has_key: bool) error{OutOfMemory}!BareLogin {
+    /// `vault_entry` is the workspace vault's entry for the current page, which
+    /// wins over the unprefixed environment pair.
+    pub fn bareLogin(arena: std.mem.Allocator, lp_names: []const []const u8, vault_entry: ?[]const u8, has_key: bool) error{OutOfMemory}!BareLogin {
+        if (vault_entry) |entry| {
+            var fields: std.json.ObjectMap = .empty;
+            try fields.put(arena, "password", .{ .string = try arena.print("${s}", .{try lp.Vault.placeholderName(arena, entry, .password)}) });
+            try fields.put(arena, "username", .{ .string = try arena.print("${s}", .{try lp.Vault.placeholderName(arena, entry, .username)}) });
+            return .{ .args = .{ .object = fields } };
+        }
         if (hasName(lp_names, "LP_PASSWORD")) {
             var fields: std.json.ObjectMap = .empty;
             try fields.put(arena, "password", .{ .string = "$LP_PASSWORD" });
@@ -824,20 +833,24 @@ test "bareLogin: the conventional names fill in, anything else is the user's cal
     defer arena.deinit();
     const aa = arena.allocator();
 
-    const conventional = (try Command.bareLogin(aa, &.{ "LP_EMAIL", "LP_PASSWORD", "LP_USERNAME" }, true)).args.object;
+    const from_vault = (try Command.bareLogin(aa, &.{"LP_PASSWORD"}, "my_site", true)).args.object;
+    try testing.expectString("$LP_MY_SITE_PASSWORD", from_vault.get("password").?.string);
+    try testing.expectString("$LP_MY_SITE_USERNAME", from_vault.get("username").?.string);
+
+    const conventional = (try Command.bareLogin(aa, &.{ "LP_EMAIL", "LP_PASSWORD", "LP_USERNAME" }, null, true)).args.object;
     try testing.expectEqual("$LP_PASSWORD", conventional.get("password").?.string);
     try testing.expectEqual("$LP_USERNAME", conventional.get("username").?.string);
 
-    const email = (try Command.bareLogin(aa, &.{ "LP_EMAIL", "LP_PASSWORD" }, true)).args.object;
+    const email = (try Command.bareLogin(aa, &.{ "LP_EMAIL", "LP_PASSWORD" }, null, true)).args.object;
     try testing.expectEqual("$LP_EMAIL", email.get("username").?.string);
 
-    const password_only = (try Command.bareLogin(aa, &.{"LP_PASSWORD"}, false)).args.object;
+    const password_only = (try Command.bareLogin(aa, &.{"LP_PASSWORD"}, null, false)).args.object;
     try testing.expectEqual(null, password_only.get("username"));
 
     const prefixed = &[_][]const u8{ "LP_HN_PASSWORD", "LP_HN_USERNAME" };
-    const usage = (try Command.bareLogin(aa, prefixed, true)).usage;
+    const usage = (try Command.bareLogin(aa, prefixed, null, true)).usage;
     try testing.expect(std.mem.find(u8, usage, "LP_HN_PASSWORD, LP_HN_USERNAME") != null);
-    try testing.expect(std.mem.find(u8, (try Command.bareLogin(aa, prefixed, false)).prompt, "getEnv with NO `name`") != null);
+    try testing.expect(std.mem.find(u8, (try Command.bareLogin(aa, prefixed, null, false)).prompt, "getEnv with NO `name`") != null);
 }
 
 test "parse: bare /login is a login call with its arguments still to find" {
