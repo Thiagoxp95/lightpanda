@@ -117,9 +117,13 @@ pub const driver_guidance =
     \\  the password field and the submit control itself, and re-reads the
     \\  page to say whether it worked. Drive the form by hand with
     \\  fill/click only when it reports it could not.
-    \\- Pass `$LP_*` references directly in ANY tool's string args (fill
-    \\  values, goto URLs, click selectors). The placeholder is resolved in
-    \\  the Lightpanda subprocess so the secret never enters your context.
+    \\- Pass `$LP_*` references directly in tool string args. The placeholder
+    \\  is resolved in the Lightpanda subprocess so the secret never enters
+    \\  your context. A workspace vault credential (`$LP_<SITE>_USERNAME`,
+    \\  `_PASSWORD`, `_TOTP`) resolves only in `fill.value` and `login`, only
+    \\  on the site it is bound to, and a password only into an
+    \\  input[type=password]; after one is filled, `evaluate` and
+    \\  `waitForScript` are refused on that page until it navigates.
     \\  If `getUrl` shows a URL where the credential is already substituted
     \\  (e.g. `?id=actualname`), DO NOT retype the literal in a follow-up
     \\  goto — keep using `$LP_*`. Retyping leaks the secret into the

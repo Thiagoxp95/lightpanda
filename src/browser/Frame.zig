@@ -249,6 +249,10 @@ _maybe_meta_refresh: bool = false,
 // The URL of the current frame
 url: [:0]const u8 = "about:blank",
 
+/// A vault credential was typed into this page. Scripts are refused on it
+/// until a navigation replaces the frame, so none can read the value back.
+_holds_vault_value: bool = false,
+
 // Unlike `url`, redirects and the History API don't change it.
 _requested_url: [:0]const u8 = "about:blank",
 

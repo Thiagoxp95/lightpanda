@@ -716,11 +716,10 @@ fn runRepl(self: *Agent) void {
         if (self.terminal.jsMode()) {
             // `line` keeps the `$LP_*` placeholder so the secret never reaches
             // the recorder; only the evaluated copy is expanded.
-            const host = browser_tools.pageHost(self.ts.session);
-            const script = browser_tools.substituteEnvVars(aa, line, host) catch |err| switch (err) {
-                error.OutOfMemory => line,
-                error.CredentialHostMismatch => {
-                    self.terminal.printError("{s}", .{browser_tools.hostMismatchText(aa, .{ .string = line }, host) catch "credential bound to another host"});
+            const script = switch (browser_tools.substituteEnvVars(aa, line) catch browser_tools.Substituted{ .text = line }) {
+                .text => |text| text,
+                .refused => |why| {
+                    self.terminal.printError("{s}", .{why});
                     continue :repl;
                 },
             };

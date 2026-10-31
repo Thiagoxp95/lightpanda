@@ -454,9 +454,16 @@ fn fillCredential(
     if (try untrustedTarget(arena, target.page, element, try submitterAt(session, submit))) {
         return plaintext_refusal;
     }
-    const text = value orelse return null;
+    const raw = value orelse return null;
+    // Resolved here, on the page and element as they stand after any earlier
+    // step: a redirect between steps changes where the password would go.
+    const text = switch (try tools.substituteForField(arena, raw, tools.fieldOf(target))) {
+        .ok => |ok| ok,
+        .refused => |why| return why,
+    };
     const scope = beginAction(session);
-    lp.actions.fill(target.node, text, target.page) catch |err| return mapActionError(err);
+    lp.actions.fill(target.node, text.text, target.page) catch |err| return mapActionError(err);
+    if (text.from_vault) target.page._holds_vault_value = true;
     _ = try settleAction(session, registry, scope);
     return null;
 }
