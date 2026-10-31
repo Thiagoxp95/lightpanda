@@ -29,6 +29,7 @@ pub const App = @import("App.zig");
 pub const Arena = @import("Arena.zig");
 pub const Regex = @import("Regex.zig");
 pub const Config = @import("Config.zig");
+pub const Vault = @import("Vault.zig");
 pub const completion = @import("completion.zig");
 pub const cookies = @import("cookies.zig");
 pub const datetime = @import("datetime.zig");

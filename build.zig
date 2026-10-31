@@ -597,6 +597,8 @@ fn linkCurl(b: *Build, mod: *Build.Module, deps: Deps, is_tsan: bool, section: b
         mod.addSystemFrameworkPath(.{ .cwd_relative = framework_path });
         mod.linkFramework("CoreFoundation", .{});
         mod.linkFramework("SystemConfiguration", .{});
+        // The vault key lives in the login Keychain.
+        mod.linkFramework("Security", .{});
     }
 }
 
