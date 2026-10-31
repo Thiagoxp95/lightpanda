@@ -2934,7 +2934,7 @@ test "call: a vault value is bound at the write, taints the page and never reach
     try std.testing.expect(std.mem.find(u8, scripted.text, "pw123") == null);
     const by_name = try call(aa, page.session, &registry, "getEnv", try parse(aa, "{\"name\":\"$LP_SITE_PASSWORD\"}"), .{ .source = .user });
     try std.testing.expect(std.mem.find(u8, by_name.text, "pw123") == null);
-    try std.testing.expect(std.mem.find(u8, by_name.text, "'$LP_SITE_PASSWORD'") != null);
+    try std.testing.expect(std.mem.find(u8, by_name.text, "'LP_SITE_PASSWORD' is a credential and is never shown") != null);
 
     // A result that carries the value is scrubbed before anyone sees it.
     const spelled = try call(aa, page.session, &registry, "evaluate", try parse(aa, "{\"script\":\"'pw1' + '23'\"}"), .{ .source = .user });
