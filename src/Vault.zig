@@ -128,8 +128,9 @@ pub fn forHost(self: *const Vault, host: []const u8) ?*const Entry {
 }
 
 /// Copies `entry` in, replacing any entry with the same name.
-pub fn put(self: *Vault, entry: Entry) error{ OutOfMemory, InvalidName }!void {
+pub fn put(self: *Vault, entry: Entry) error{ OutOfMemory, InvalidName, InvalidHost }!void {
     if (!validName(entry.name)) return error.InvalidName;
+    for (entry.hosts) |h| if (!validHost(h)) return error.InvalidHost;
     const aa = self.arena.allocator();
     const hosts = try aa.alloc([]const u8, entry.hosts.len);
     for (entry.hosts, hosts) |src, *dst| dst.* = try lowerDupe(aa, src);
@@ -161,13 +162,43 @@ pub fn remove(self: *Vault, name: []const u8) bool {
     return false;
 }
 
-/// `pattern` is an entry host; `host` matches when it is that host or a
-/// subdomain of it. `evil-example.com` and `example.com.evil.net` do not.
+/// `pattern` is an entry host: the host itself, or `*.example.com` for
+/// `example.com` and every host under it. `evil-example.com` and
+/// `example.com.evil.net` match neither form.
 pub fn hostMatches(pattern: []const u8, host: []const u8) bool {
-    if (std.ascii.eqlIgnoreCase(pattern, host)) return true;
-    if (host.len <= pattern.len + 1) return false;
-    const dot = host.len - pattern.len - 1;
-    return host[dot] == '.' and std.ascii.eqlIgnoreCase(host[dot + 1 ..], pattern);
+    const apex = if (std.mem.startsWith(u8, pattern, "*.")) pattern["*.".len..] else {
+        return std.ascii.eqlIgnoreCase(pattern, host);
+    };
+    if (std.ascii.eqlIgnoreCase(apex, host)) return true;
+    if (host.len <= apex.len + 1) return false;
+    const dot = host.len - apex.len - 1;
+    return host[dot] == '.' and std.ascii.eqlIgnoreCase(host[dot + 1 ..], apex);
+}
+
+/// A host an entry may be bound to: a name with at least two labels, or
+/// `*.` before one, so a single label such as `com` cannot claim every site;
+/// `localhost` and IP literals, which have no such ambiguity, are the
+/// exception.
+pub fn validHost(pattern: []const u8) bool {
+    const name = if (std.mem.startsWith(u8, pattern, "*.")) pattern["*.".len..] else pattern;
+    if (name.len == 0 or name.len > 253) return false;
+    if (std.mem.findScalar(u8, name, ':') != null) {
+        _ = std.Io.net.Ip6Address.parse(name, 0) catch return false;
+        return pattern.ptr == name.ptr;
+    }
+    var labels: usize = 0;
+    var it = std.mem.splitScalar(u8, name, '.');
+    while (it.next()) |label| {
+        if (label.len == 0 or label.len > 63) return false;
+        if (label[0] == '-' or label[label.len - 1] == '-') return false;
+        for (label) |c| switch (c) {
+            'a'...'z', 'A'...'Z', '0'...'9', '-' => {},
+            else => return false,
+        };
+        labels += 1;
+    }
+    if (labels >= 2) return true;
+    return pattern.ptr == name.ptr and std.ascii.eqlIgnoreCase(name, "localhost");
 }
 
 /// `buf` receives the lowercased entry name the result points into.
@@ -410,24 +441,31 @@ fn storeKey(allocator: Allocator, ws: Workspace, key: *const [Aead.key_length]u8
 
 // ---- Bitwarden unencrypted JSON export
 
-pub const ImportCount = struct { imported: usize = 0, skipped: usize = 0 };
+pub const ImportCount = struct {
+    imported: usize = 0,
+    /// Logins without a password.
+    skipped: usize = 0,
+    /// URI hosts `validHost` refused, left off their entries.
+    invalid_hosts: usize = 0,
+};
 
 /// Login items (type 1) become entries: the name slugified, hosts from the
-/// URIs, TOTP from a raw secret or an `otpauth://` URL. `folder` limits the
-/// import to one Bitwarden folder, by name.
+/// URIs taken as written, TOTP from a raw secret or an `otpauth://` URL.
+/// `folder` limits the import to one Bitwarden folder, by name; a folder
+/// without an id cannot own an item, so naming one is `FolderNotFound`.
 pub fn importBitwarden(self: *Vault, arena: Allocator, json_text: []const u8, folder: ?[]const u8) !ImportCount {
     const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, json_text, .{});
     if (root != .object) return error.NotABitwardenExport;
     if (root.object.get("encrypted")) |enc| {
         if (enc == .bool and enc.bool) return error.EncryptedExport;
     }
-    const folder_id: ?std.json.Value = if (folder) |want| blk: {
+    const folder_id: ?[]const u8 = if (folder) |want| blk: {
         const folders = root.object.get("folders") orelse return error.FolderNotFound;
         if (folders != .array) return error.FolderNotFound;
         for (folders.array.items) |f| {
             if (f != .object) continue;
-            const name = f.object.get("name") orelse continue;
-            if (name == .string and std.mem.eql(u8, name.string, want)) break :blk f.object.get("id") orelse .null;
+            const name = jsonString(f.object.get("name")) orelse continue;
+            if (std.mem.eql(u8, name, want)) break :blk jsonString(f.object.get("id")) orelse return error.FolderNotFound;
         }
         return error.FolderNotFound;
     } else null;
@@ -440,8 +478,8 @@ pub fn importBitwarden(self: *Vault, arena: Allocator, json_text: []const u8, fo
         const kind = item.object.get("type") orelse continue;
         if (kind != .integer or kind.integer != 1) continue;
         if (folder_id) |want| {
-            const have = item.object.get("folderId") orelse .null;
-            if (!jsonStringEql(have, want)) continue;
+            const have = jsonString(item.object.get("folderId")) orelse continue;
+            if (!std.mem.eql(u8, have, want)) continue;
         }
         const login = item.object.get("login") orelse continue;
         if (login != .object) continue;
@@ -458,6 +496,10 @@ pub fn importBitwarden(self: *Vault, arena: Allocator, json_text: []const u8, fo
                 if (u != .object) continue;
                 const uri = jsonString(u.object.get("uri")) orelse continue;
                 const host = hostOfUri(uri) orelse continue;
+                if (!validHost(host)) {
+                    count.invalid_hosts += 1;
+                    continue;
+                }
                 try hosts.append(arena, host);
             };
         }
@@ -477,10 +519,6 @@ pub fn importBitwarden(self: *Vault, arena: Allocator, json_text: []const u8, fo
 fn jsonString(v: ?std.json.Value) ?[]const u8 {
     const val = v orelse return null;
     return if (val == .string) val.string else null;
-}
-
-fn jsonStringEql(a: std.json.Value, b: std.json.Value) bool {
-    return a == .string and b == .string and std.mem.eql(u8, a.string, b.string);
 }
 
 /// `[a-z0-9_]` from any text, `item` when nothing survives, `_2`, `_3`… when
@@ -653,6 +691,7 @@ test "Vault: put replaces by name, remove" {
     try testing.expectEqual(1, vault.entries.items.len);
     try testing.expectEqualStrings("u2", vault.find("a").?.username);
     try testing.expectError(error.InvalidName, vault.put(.{ .name = "Bad-Name", .hosts = &.{}, .username = "", .password = "" }));
+    try testing.expectError(error.InvalidHost, vault.put(.{ .name = "b", .hosts = &.{"com"}, .username = "", .password = "" }));
     try testing.expectEqual(true, vault.remove("a"));
     try testing.expectEqual(false, vault.remove("a"));
     try testing.expectEqual(0, vault.entries.items.len);
@@ -687,26 +726,51 @@ test "Vault: placeholder parse" {
 test "Vault: host match" {
     const cases = [_]struct { pattern: []const u8, host: []const u8, ok: bool }{
         .{ .pattern = "ycombinator.com", .host = "ycombinator.com", .ok = true },
-        .{ .pattern = "ycombinator.com", .host = "news.ycombinator.com", .ok = true },
-        .{ .pattern = "ycombinator.com", .host = "a.b.ycombinator.com", .ok = true },
-        .{ .pattern = "ycombinator.com", .host = "News.YCombinator.COM", .ok = true },
+        .{ .pattern = "ycombinator.com", .host = "YCombinator.COM", .ok = true },
+        .{ .pattern = "ycombinator.com", .host = "news.ycombinator.com", .ok = false },
+        .{ .pattern = "*.ycombinator.com", .host = "news.ycombinator.com", .ok = true },
+        .{ .pattern = "*.ycombinator.com", .host = "a.b.ycombinator.com", .ok = true },
+        .{ .pattern = "*.ycombinator.com", .host = "ycombinator.com", .ok = true },
+        .{ .pattern = "*.ycombinator.com", .host = "News.YCombinator.COM", .ok = true },
+        .{ .pattern = "*.ycombinator.com", .host = "evil-ycombinator.com", .ok = false },
+        .{ .pattern = "*.ycombinator.com", .host = "ycombinator.com.evil.com", .ok = false },
+        .{ .pattern = "*.ycombinator.com", .host = "ycombinator.co", .ok = false },
+        .{ .pattern = "*.ycombinator.com", .host = "", .ok = false },
         .{ .pattern = "127.0.0.1", .host = "127.0.0.1", .ok = true },
-        .{ .pattern = "ycombinator.com", .host = "evil-ycombinator.com", .ok = false },
-        .{ .pattern = "ycombinator.com", .host = "ycombinator.com.evil.com", .ok = false },
-        .{ .pattern = "ycombinator.com", .host = "ycombinator.co", .ok = false },
-        .{ .pattern = "ycombinator.com", .host = "", .ok = false },
         .{ .pattern = "127.0.0.1", .host = "localhost", .ok = false },
         .{ .pattern = "news.ycombinator.com", .host = "ycombinator.com", .ok = false },
+        .{ .pattern = "com", .host = "example.com", .ok = false },
     };
     for (cases) |c| {
         try testing.expectEqual(c.ok, hostMatches(c.pattern, c.host));
+    }
+
+    const hosts = [_]struct { host: []const u8, ok: bool }{
+        .{ .host = "example.com", .ok = true },
+        .{ .host = "*.example.com", .ok = true },
+        .{ .host = "a.b.example.com", .ok = true },
+        .{ .host = "localhost", .ok = true },
+        .{ .host = "127.0.0.1", .ok = true },
+        .{ .host = "::1", .ok = true },
+        .{ .host = "com", .ok = false },
+        .{ .host = "*.com", .ok = false },
+        .{ .host = "*.localhost", .ok = false },
+        .{ .host = "*.", .ok = false },
+        .{ .host = "", .ok = false },
+        .{ .host = "example..com", .ok = false },
+        .{ .host = "-example.com", .ok = false },
+        .{ .host = "exa mple.com", .ok = false },
+        .{ .host = "example.com:443", .ok = false },
+    };
+    for (hosts) |h| {
+        try testing.expectEqual(h.ok, validHost(h.host));
     }
 }
 
 test "Vault: lookup binds to host, unbound does not" {
     var vault: Vault = .empty(testing.allocator);
     defer vault.deinit();
-    try vault.put(.{ .name = "hn", .hosts = &.{"ycombinator.com"}, .username = "alice", .password = "pw123" });
+    try vault.put(.{ .name = "hn", .hosts = &.{"*.ycombinator.com"}, .username = "alice", .password = "pw123" });
 
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -761,10 +825,10 @@ test "Vault: TOTP against RFC 6238 SHA-1 vectors" {
 test "Vault: Bitwarden import" {
     const fixture =
         \\{"encrypted": false,
-        \\ "folders": [{"id": "f-1", "name": "Work"}, {"id": "f-2", "name": "Home"}],
+        \\ "folders": [{"id": "f-1", "name": "Work"}, {"id": "f-2", "name": "Home"}, {"id": null, "name": "No id"}],
         \\ "items": [
         \\  {"type": 1, "name": "Hacker News", "folderId": "f-1",
-        \\   "login": {"uris": [{"match": null, "uri": "https://news.ycombinator.com/login"}, {"uri": "ycombinator.com:443/x"}, {"uri": "androidapp://com.example"}],
+        \\   "login": {"uris": [{"match": null, "uri": "https://news.ycombinator.com/login"}, {"uri": "ycombinator.com:443/x"}, {"uri": "androidapp://com.example"}, {"uri": "https://com"}],
         \\             "username": "alice", "password": "pw123", "totp": "otpauth://totp/HN:alice?secret=JBSWY3DPEHPK3PXP&issuer=HN"}},
         \\  {"type": 1, "name": "Hacker News", "folderId": "f-1",
         \\   "login": {"uris": [{"uri": "https://user:pw@old.ycombinator.com:8080/"}], "username": "bob", "password": "pw456", "totp": "JBSWY3DPEHPK3PXP"}},
@@ -781,6 +845,7 @@ test "Vault: Bitwarden import" {
     const work = try vault.importBitwarden(arena.allocator(), fixture, "Work");
     try testing.expectEqual(2, work.imported);
     try testing.expectEqual(1, work.skipped);
+    try testing.expectEqual(1, work.invalid_hosts);
     try testing.expectEqual(2, vault.entries.items.len);
 
     const hn = vault.find("hacker_news").?;
@@ -799,6 +864,7 @@ test "Vault: Bitwarden import" {
     try testing.expectEqual(3, all.imported);
     try testing.expect(vault.find("bank") != null);
     try testing.expectError(error.FolderNotFound, vault.importBitwarden(arena.allocator(), fixture, "Nope"));
+    try testing.expectError(error.FolderNotFound, vault.importBitwarden(arena.allocator(), fixture, "No id"));
     try testing.expectError(error.EncryptedExport, vault.importBitwarden(arena.allocator(), "{\"encrypted\": true, \"items\": []}", null));
 }
 

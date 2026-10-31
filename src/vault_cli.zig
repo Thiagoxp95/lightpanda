@@ -81,13 +81,16 @@ pub fn run(allocator: Allocator, opts: Options) !void {
         if (secrets.password.len == 0) return fail("no password on stdin", .{});
         if (opts.totp_stdin and secrets.totp.?.len == 0) return fail("--totp-stdin but no second line on stdin", .{});
 
-        try vault.put(.{
+        vault.put(.{
             .name = name,
             .hosts = opts.host.items,
             .username = username,
             .password = secrets.password,
             .totp_secret = secrets.totp,
-        });
+        }) catch |err| switch (err) {
+            error.InvalidHost => return fail("--host takes a host such as example.com, *.example.com, localhost or an IP; a single label such as \"com\" would match every site", .{}),
+            else => return err,
+        };
         try vault.save(allocator, ws);
         const up = upper(name);
         try out.print("added \"{s}\" to vault \"{s}\": $LP_{s}_USERNAME, $LP_{s}_PASSWORD{s}{s}\n", .{
@@ -118,7 +121,7 @@ pub fn run(allocator: Allocator, opts: Options) !void {
             else => return err,
         };
         try vault.save(allocator, ws);
-        try out.print("imported {d} login(s) into vault \"{s}\" ({d} without a password skipped)\n", .{ count.imported, ws.name, count.skipped });
+        try out.print("imported {d} login(s) into vault \"{s}\" ({d} without a password skipped, {d} URI host(s) left off as invalid)\n", .{ count.imported, ws.name, count.skipped, count.invalid_hosts });
         return;
     }
     return error.Usage;
@@ -158,12 +161,13 @@ fn readSecrets(allocator: Allocator, want_totp: bool) !Secrets {
     const tty = stdin.isTty(lp.io) catch false;
 
     var saved: std.c.termios = undefined;
-    if (tty and std.c.tcgetattr(stdin.handle, &saved) == 0) {
+    const echo_off = tty and std.c.tcgetattr(stdin.handle, &saved) == 0;
+    if (echo_off) {
         var quiet = saved;
         quiet.lflag.ECHO = false;
         _ = std.c.tcsetattr(stdin.handle, .NOW, &quiet);
     }
-    defer if (tty) {
+    defer if (echo_off) {
         _ = std.c.tcsetattr(stdin.handle, .NOW, &saved);
     };
 

@@ -110,10 +110,11 @@ pub fn load(service: []const u8, account: []const u8, out: []u8) !bool {
     const status = SecItemCopyMatching(q.dict, &result);
     if (status == errSecItemNotFound) return false;
     if (status != 0) return keychainError(status);
-    defer CFRelease(result);
-    const len: usize = @intCast(CFDataGetLength(result));
+    const data = result orelse return error.KeychainFailed;
+    defer CFRelease(data);
+    const len: usize = @intCast(CFDataGetLength(data));
     if (len != out.len) return error.VaultKeyCorrupt;
-    @memcpy(out, CFDataGetBytePtr(result)[0..len]);
+    @memcpy(out, CFDataGetBytePtr(data)[0..len]);
     return true;
 }
 
