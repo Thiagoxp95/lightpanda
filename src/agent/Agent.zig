@@ -716,7 +716,13 @@ fn runRepl(self: *Agent) void {
         if (self.terminal.jsMode()) {
             // `line` keeps the `$LP_*` placeholder so the secret never reaches
             // the recorder; only the evaluated copy is expanded.
-            const script = browser_tools.substituteEnvVars(aa, line) catch line;
+            const script = switch (browser_tools.substituteEnvVars(aa, line) catch browser_tools.Substituted{ .text = line }) {
+                .text => |text| text,
+                .refused => |why| {
+                    self.terminal.printError("{s}", .{why});
+                    continue :repl;
+                },
+            };
             const result = browser_tools.evalScript(aa, self.ts.session, &self.ts.registry, script) catch |err| {
                 self.terminal.printError("{s}", .{switch (err) {
                     error.OutOfMemory => "out of memory",
@@ -792,8 +798,9 @@ fn runRepl(self: *Agent) void {
                 var tc = parsed;
                 if (tc.tool == .login and tc.args == null) {
                     const names = browser_tools.lpEnvNames(aa) catch continue :repl;
+                    const vault_entry = browser_tools.vaultEntryForHost(browser_tools.pageHost(self.ts.session));
                     const has_key = zenai.typesafe.Client.envApiKey(lp.environ()) != null;
-                    switch (Command.bareLogin(aa, names, has_key) catch continue :repl) {
+                    switch (Command.bareLogin(aa, names, vault_entry, has_key) catch continue :repl) {
                         .args => |args| tc.args = args,
                         .prompt => |prompt| {
                             self.terminal.printInfo("no " ++ zenai.typesafe.env_var_name ++ "; asking the model instead", .{});

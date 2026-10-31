@@ -99,6 +99,17 @@ fn run(allocator: Allocator, main_arena: Allocator, proc_args: std.process.Args)
             try lp.Agent.listModels(allocator, opts);
             return std.process.cleanExit(lp.io);
         },
+        .vault => |opts| {
+            lp.vault_cli.run(allocator, opts) catch |err| switch (err) {
+                error.Usage => return args.printUsageAndExit(main_arena, .vault, false),
+                error.VaultCommandFailed => std.process.exit(1),
+                else => {
+                    log.fatal(.app, "vault", .{ .err = err });
+                    std.process.exit(1);
+                },
+            };
+            return std.process.cleanExit(lp.io);
+        },
         else => {},
     }
 

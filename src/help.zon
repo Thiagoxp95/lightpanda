@@ -11,6 +11,7 @@
     \\  mcp         starts an MCP (Model Context Protocol) server (stdio or HTTP)
     \\  run         runs a saved script (no LLM), then exits
     \\  serve       starts a WebSocket CDP server
+    \\  vault       stores a workspace's sign-in credentials, used as $LP_* placeholders
     \\  version     displays the version of {0s}
     \\
     \\Use "{0s} help <command>" for more information about a command.
@@ -418,6 +419,48 @@
     \\          Checks whether a newer release of {0s} is available. When one is
     \\          found, prints the running version, the latest release, and how to
     \\          update.
+    ,
+    .vault =
+    \\usage: {0s} vault add <NAME> --host <HOST> [--host <HOST>] --username <USER> [--totp-stdin]
+    \\       {0s} vault list
+    \\       {0s} vault rm <NAME>
+    \\       {0s} vault import-bitwarden <EXPORT.json> [--folder <FOLDER>]
+    \\
+    \\Edits the credential vault of a workspace (--workspace or the
+    \\LIGHTPANDA_WORKSPACE environment variable). An entry NAME is 1 to 32
+    \\characters of a-z, 0-9 or '_'. In agent, mcp, run and serve modes with
+    \\that workspace, the entry resolves as $LP_<NAME>_USERNAME,
+    \\$LP_<NAME>_PASSWORD and, with a TOTP secret, $LP_<NAME>_TOTP (the current
+    \\code), but only on a page whose host is one of the entry's hosts or a
+    \\subdomain of one. getEnv never shows these values.
+    \\
+    \\`add` reads the password from stdin: one line when piped, with no echo on
+    \\a terminal. It replaces an existing entry of the same NAME. `list` never
+    \\shows passwords.
+    \\
+    \\The vault is <data dir>/workspaces/<NAME>/vault.lpv (mode 0600), encrypted
+    \\with a key kept in the macOS login Keychain (service "lightpanda-vault",
+    \\account = workspace) or, elsewhere, in vault.key next to it.
+    \\
+    \\options:
+    \\  --folder <FOLDER>
+    \\          import-bitwarden: only the items in this Bitwarden folder, so one
+    \\          folder maps to one workspace.
+    \\  --host <HOST>
+    \\          add: a host the entry may be sent to, e.g. news.ycombinator.com.
+    \\          Repeatable. Subdomains of it match too.
+    \\  --totp-stdin
+    \\          add: also read the base32 TOTP secret, as a second line on stdin.
+    \\  --username <USER>
+    \\          add: the username or email to sign in with.
+    \\  --workspace <NAME>
+    \\          The workspace whose vault to edit. Defaults to the
+    \\          LIGHTPANDA_WORKSPACE environment variable.
+    \\
+    \\Examples:
+    \\  printf '%s\\n' "$PASSWORD" | {0s} vault add hn --workspace personal \\
+    \\      --host news.ycombinator.com --username alice
+    \\  {0s} vault import-bitwarden ~/bitwarden.json --workspace tedy --folder Work
     ,
     .completion =
     \\usage: {0s} completion <bash | fish | zsh>

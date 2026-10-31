@@ -90,6 +90,7 @@ pub fn init(self: *LightPanda, app: *App, iid: ?[36]u8) !void {
             .version => "V",
             .help => "H",
             .completion => "C",
+            .vault => "VA",
         },
     };
 }

@@ -506,6 +506,17 @@ pub const Commands = cli.Builder(.{
         .{ .name = "check", .type = bool },
     } },
     .{
+        .name = "vault",
+        .positional = .{ .name = "args", .type = [:0]const u8, .multiple = true },
+        .options = .{
+            .{ .name = "workspace", .type = ?[]const u8, .validator = workspaceValidator },
+            .{ .name = "host", .type = []const u8, .multiple = true },
+            .{ .name = "username", .type = ?[]const u8 },
+            .{ .name = "totp_stdin", .type = bool },
+            .{ .name = "folder", .type = ?[]const u8 },
+        },
+    },
+    .{
         .name = "completion",
         .positional = .{ .name = "shell", .type = ?Shell },
         .options = .{},
@@ -526,7 +537,7 @@ http_headers: HttpHeaders,
 
 fn modeNeedsHttp(mode: Mode) bool {
     return switch (mode) {
-        .help => false,
+        .help, .vault => false,
         .version => |opts| opts.check,
         else => true,
     };
@@ -864,7 +875,7 @@ pub fn cookieJarFile(self: *const Config, workspace_default: ?[]const u8) ?[]con
 
 pub fn workspaceName(self: *const Config) ?[]const u8 {
     return switch (self.mode) {
-        inline .serve, .fetch, .mcp, .agent => |opts| opts.workspace,
+        inline .serve, .fetch, .mcp, .agent, .vault => |opts| opts.workspace,
         else => null,
     };
 }
@@ -1237,7 +1248,7 @@ pub fn printUsageAndExit(self: *const Config, allocator: Allocator, help_for: Ru
             , .{ @field(Help, @tagName(tag)), Help.common_options });
             break :text try allocator.print(template, .{ exec_name, info_or_warn, pretty_or_logfmt });
         },
-        inline .version, .completion => |tag| text: {
+        inline .version, .completion, .vault => |tag| text: {
             const template = @field(Help, @tagName(tag)) ++ "\n";
             break :text try allocator.print(template, .{exec_name});
         },
