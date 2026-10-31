@@ -643,6 +643,9 @@ pub const Jar = struct {
     sites: std.StringArrayHashMapUnmanaged(std.ArrayList(Cookie)),
     // Cookies across all sites.
     len: usize,
+    // Bumped on every add, replace and removal, so a holder can tell whether
+    // the jar changed since it last wrote it out.
+    version: u64 = 0,
     // Optional notifier for cookie change events. When set, `add` dispatches
     // `cookie_changed` after a real mutation. Session populates this; the
     // standalone test construction leaves it null.
@@ -666,6 +669,7 @@ pub const Jar = struct {
         self.freeSites();
         self.sites.clearRetainingCapacity();
         self.len = 0;
+        self.version += 1;
     }
 
     fn freeSites(self: *Jar) void {
@@ -929,6 +933,7 @@ pub const Jar = struct {
         g: usize,
         i: usize,
     ) void {
+        self.version += 1;
         const notification = self.notification orelse return;
         const group = &self.sites.values()[g];
         self.sites.lockPointers();
@@ -967,6 +972,7 @@ pub const Jar = struct {
             if (isCookieExpired(&group.items[i], now)) {
                 group.orderedRemove(i).deinit();
                 self.len -= 1;
+                self.version += 1;
             }
         }
         if (group.items.len == 0) {

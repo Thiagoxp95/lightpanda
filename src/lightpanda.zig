@@ -268,12 +268,12 @@ pub fn fetch(app: *App, browser: *Browser, urls: []const [:0]const u8, opts: Fet
     // Session.deinit unregisters from notification; close before notification.deinit runs.
     defer browser.closeSession();
 
-    if (app.config.cookieFile()) |cookie_path| {
+    if (app.config.cookieFile(app.workspace_cookies)) |cookie_path| {
         cookies.loadFromFile(session, cookie_path);
     }
 
     defer {
-        if (app.config.cookieJarFile()) |cookie_jar_path| {
+        if (app.config.cookieJarFile(app.workspace_cookies)) |cookie_jar_path| {
             cookies.saveToFile(&session.cookie_jar, cookie_jar_path);
         }
     }

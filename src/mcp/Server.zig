@@ -64,12 +64,8 @@ pub fn initSession(allocator: std.mem.Allocator, app: *App, writer: *std.Io.Writ
     try entry.init(app);
     errdefer entry.deinit();
 
-    // Only the default session is backed by the on-disk cookie file; named
-    // sessions start clean so agents stay isolated by default.
-    if (isDefault(id)) {
-        if (app.config.cookieFile()) |cookie_path| {
-            lp.cookies.loadFromFile(entry.session, cookie_path);
-        }
+    if (persistsCookies(app, id)) {
+        entry.loadCookies(app);
     }
     entry.exitIsolate();
 
@@ -85,10 +81,8 @@ pub fn initSession(allocator: std.mem.Allocator, app: *App, writer: *std.Io.Writ
 
 pub fn deinit(self: *Self) void {
     const entry = self.active_session;
-    if (isDefault(self.session_id)) {
-        if (self.app.config.cookieJarFile()) |cookie_jar_path| {
-            lp.cookies.saveToFile(&entry.session.cookie_jar, cookie_jar_path);
-        }
+    if (persistsCookies(self.app, self.session_id)) {
+        entry.saveCookies(self.app);
     }
     entry.enterIsolate();
     entry.deinit();
@@ -96,6 +90,14 @@ pub fn deinit(self: *Self) void {
 
     self.transport.deinit();
     self.allocator.destroy(self);
+}
+
+/// Without a workspace only the default session is backed by the on-disk
+/// cookie files; named sessions start clean so agents stay isolated by
+/// default. A workspace is one identity, so every session shares its jar:
+/// each loads it at start and writes it back on close, and the last writer wins.
+fn persistsCookies(app: *const App, id: []const u8) bool {
+    return isDefault(id) or app.workspace != null;
 }
 
 pub fn isDefault(id: []const u8) bool {
@@ -146,6 +148,7 @@ pub fn handleToolCall(self: *Self, arena: std.mem.Allocator, req: protocol.Reque
     const entry = self.active_session;
     entry.enterIsolate();
     defer entry.exitIsolate();
+    defer if (persistsCookies(self.app, self.session_id)) entry.flushCookies(self.app);
     return tools.handleCall(self, arena, req);
 }
 
@@ -175,7 +178,7 @@ test "MCP.Server - Integration: synchronous smoke test" {
     var server = try Self.init(allocator, app, &out_alloc.writer);
     defer server.deinit();
 
-    try router.processRequests(server, &in_reader, null);
+    try router.processRequests(server, &in_reader, null, &.init(false));
 
     try testing.expectJson(.{ .jsonrpc = "2.0", .id = 1, .result = .{ .protocolVersion = "2024-11-05" } }, out_alloc.writer.buffered());
 }

@@ -24,6 +24,7 @@ const cli = @import("cli.zig");
 const string = @import("string.zig");
 const dump = @import("browser/dump.zig");
 const Mime = @import("browser/Mime.zig");
+const Workspace = @import("Workspace.zig");
 
 const WebBotAuthConfig = @import("network/WebBotAuth.zig").Config;
 const HttpHeader = @import("network/http.zig").Header;
@@ -292,6 +293,7 @@ const CommonOptions = .{
     .{ .name = "adblock_lists", .type = ?[]const u8, .validator = accumulateValidator, .path = true },
     .{ .name = "cookie", .type = ?[]const u8, .path = true },
     .{ .name = "cookie_jar", .type = ?[]const u8, .path = true },
+    .{ .name = "workspace", .type = ?[]const u8, .validator = workspaceValidator },
     .{ .name = "disable_subframes", .type = bool, .deprecated = "subframes are now disabled by default, use \"--load-resources iframe\" to enable" },
     .{ .name = "disable_workers", .type = bool, .deprecated = "workers are now disabled by default, use \"--load-resources worker\" to enable" },
     .{ .name = "enable_external_stylesheets", .type = bool, .deprecated = "use \"--load-resources stylesheet\" to enable" },
@@ -547,6 +549,14 @@ pub fn init(allocator: Allocator, exec_name: []const u8, mode: Mode) !Config {
                 if (m.enable_external_stylesheets) {
                     // map deprecated property onto updated one
                     m.load_resources.stylesheet = true;
+                }
+            }
+            // The flag wins; the environment names the default workspace. The
+            // env slice lives as long as the process, so it is not copied.
+            if (@hasField(@TypeOf(m.*), "workspace") and m.workspace == null) {
+                if (std.c.getenv("LIGHTPANDA_WORKSPACE")) |env| {
+                    try checkWorkspaceName("LIGHTPANDA_WORKSPACE", std.mem.span(env));
+                    m.workspace = std.mem.span(env);
                 }
             }
             // The agent-facing modes read visibility, which is wrong without
@@ -836,16 +846,25 @@ pub fn httpCacheEntryLimit(self: *const Config) u32 {
     };
 }
 
-pub fn cookieFile(self: *const Config) ?[]const u8 {
+/// The file to load cookies from: `--cookie`, else the workspace's jar.
+pub fn cookieFile(self: *const Config, workspace_default: ?[]const u8) ?[]const u8 {
     return switch (self.mode) {
-        inline .serve, .fetch, .mcp, .agent => |opts| opts.cookie,
+        inline .serve, .fetch, .mcp, .agent => |opts| opts.cookie orelse workspace_default,
         else => null,
     };
 }
 
-pub fn cookieJarFile(self: *const Config) ?[]const u8 {
+/// The file to save cookies to: `--cookie-jar`, else the workspace's jar.
+pub fn cookieJarFile(self: *const Config, workspace_default: ?[]const u8) ?[]const u8 {
     return switch (self.mode) {
-        inline .serve, .fetch, .mcp, .agent => |opts| opts.cookie_jar,
+        inline .serve, .fetch, .mcp, .agent => |opts| opts.cookie_jar orelse workspace_default,
+        else => null,
+    };
+}
+
+pub fn workspaceName(self: *const Config) ?[]const u8 {
+    return switch (self.mode) {
+        inline .serve, .fetch, .mcp, .agent => |opts| opts.workspace,
         else => null,
     };
 }
@@ -1347,6 +1366,20 @@ pub fn parseArgs(allocator: Allocator, proc_args: std.process.Args) !Config {
     return config;
 }
 
+test "Config: --cookie and --cookie-jar beat the workspace's jar" {
+    var plain = try Config.init(std.testing.allocator, "test", .{ .fetch = .{} });
+    defer plain.deinit(std.testing.allocator);
+    try std.testing.expectEqual(null, plain.cookieFile(null));
+    try std.testing.expectEqual(null, plain.cookieJarFile(null));
+    try std.testing.expectEqualStrings("ws.json", plain.cookieFile("ws.json").?);
+    try std.testing.expectEqualStrings("ws.json", plain.cookieJarFile("ws.json").?);
+
+    var explicit = try Config.init(std.testing.allocator, "test", .{ .fetch = .{ .cookie = "in.json", .cookie_jar = "out.json" } });
+    defer explicit.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("in.json", explicit.cookieFile("ws.json").?);
+    try std.testing.expectEqualStrings("out.json", explicit.cookieJarFile("ws.json").?);
+}
+
 test "Config: adblockLists splits comma-separated paths" {
     var config = try Config.init(std.testing.allocator, "test", .{ .serve = .{
         .adblock_lists = "easylist.txt,easyprivacy.txt",
@@ -1747,6 +1780,19 @@ fn accumulateValidator(allocator: Allocator, args: *std.process.Args.Iterator, f
         return;
     };
     field.* = try std.mem.join(allocator, ",", &.{ existing, str });
+}
+
+fn checkWorkspaceName(source: []const u8, name: []const u8) !void {
+    if (Workspace.validName(name) == false) {
+        log.fatal(.app, "invalid option value", .{ .arg = source, .value = name, .hint = "must be 1 to 64 characters of a-z, 0-9, '_' or '-'" });
+        return error.InvalidArgument;
+    }
+}
+
+fn workspaceValidator(allocator: Allocator, args: *std.process.Args.Iterator, field: *?[]const u8) !void {
+    const str = args.next() orelse return error.MissingArgument;
+    try checkWorkspaceName("--workspace", str);
+    field.* = try allocator.dupe(u8, str);
 }
 
 fn userAgentValidator(allocator: Allocator, args: *std.process.Args.Iterator, ua: *?[]const u8) !void {

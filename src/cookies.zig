@@ -17,6 +17,8 @@ const std = @import("std");
 const lp = @import("lightpanda");
 
 const Session = @import("browser/Session.zig");
+const Workspace = @import("Workspace.zig");
+const testing = @import("testing.zig");
 const Cookie = @import("browser/webapi/storage/Cookie.zig");
 
 const log = lp.log;
@@ -92,8 +94,9 @@ fn _saveToFile(jar: *Cookie.Jar, path: []const u8) !void {
     jar.removeExpired(null);
 
     // Concurrent serve connections may save the same path: the last rename
-    // wins, but no reader sees a torn file.
-    var af = try std.Io.Dir.cwd().createFileAtomic(lp.io, path, .{ .replace = true });
+    // wins, but no reader sees a torn file. The jar holds sign-ins, so the
+    // file is owner-only.
+    var af = try std.Io.Dir.cwd().createFileAtomic(lp.io, path, .{ .replace = true, .permissions = Workspace.private_file });
     defer af.deinit(lp.io);
 
     var buf: [8192]u8 = undefined;
@@ -465,4 +468,42 @@ test "cookies: load JSON keeps a session cookie with expires -1" {
     try jar.add(try parsed[0].toCookie(jar.allocator), lp.datetime.timestamp(.real), true);
     try std.testing.expectEqual(1, jar.len);
     try std.testing.expectEqual(null, nthCookie(&jar, 0).expires);
+}
+
+test "cookies: a saved jar loads back, owner-only, and the jar's version tracks changes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir = try tmp.dir.realPathFileAlloc(lp.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(dir);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ dir, "cookies.json" });
+    defer std.testing.allocator.free(path);
+
+    var jar = Cookie.Jar.init(std.testing.allocator, null);
+    defer jar.deinit();
+    try std.testing.expectEqual(@as(u64, 0), jar.version);
+
+    const now = lp.datetime.timestamp(.real);
+    const cookie = try Cookie.parse(std.testing.allocator, "http://example.com/", "sid=abc; Max-Age=3600");
+    try jar.add(cookie, now, true);
+    try std.testing.expect(jar.version > 0);
+
+    saveToFile(&jar, path);
+    const saved = jar.version;
+    saveToFile(&jar, path);
+    try std.testing.expectEqual(saved, jar.version);
+
+    if (@import("builtin").os.tag != .windows) {
+        const stat = try tmp.dir.statFile(lp.io, "cookies.json", .{});
+        try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @backingInt(stat.permissions)) & 0o777);
+    }
+
+    const session = testing.test_session;
+    defer session.cookie_jar.clearRetainingCapacity();
+    loadFromFile(session, path);
+    try std.testing.expectEqual(@as(usize, 1), session.cookie_jar.len);
+    const loaded = nthCookie(&session.cookie_jar, 0);
+    try std.testing.expectEqualStrings("sid", loaded.name);
+    try std.testing.expectEqualStrings("abc", loaded.value);
+    try std.testing.expectEqualStrings("example.com", loaded.domain);
 }
