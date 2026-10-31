@@ -1957,7 +1957,9 @@ fn execGetEnv(arena: std.mem.Allocator, arguments: ?std.json.Value) ToolError![]
     const Params = struct { name: ?[]const u8 = null };
     const args = try parseArgsOrDefault(Params, arena, arguments);
 
-    if (args.name) |name| {
+    // Never substituted (`arg_rules`), so `$LP_X` here is the name LP_X.
+    if (args.name) |raw| {
+        const name = std.mem.trimStart(u8, raw, "$");
         if (!modelReadable(name)) {
             return arena.print("'{s}' is a credential and is never shown; use it as ${s} in a tool argument instead", .{ name, name }) catch ToolError.InternalError;
         }
